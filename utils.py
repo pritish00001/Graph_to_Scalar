@@ -1,5 +1,19 @@
 import torch
 from typing import Tuple
+import os
+import torch
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from typing import Tuple
+from torch_geometric.data import Data, Dataset
+from torch_geometric.loader import DataLoader
+import scipy.sparse as sp
+from scipy.sparse.linalg import lobpcg
+import numpy as np
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="scipy")
+
 
 
 def build_adjacency(edge_index, num_nodes, edge_weight=None, device='cuda'):
@@ -150,4 +164,32 @@ def unnormalize_adjacency(normalized_adj, D):
     unnormalized_adj = D_row * normalized_adj * D_col  # shape [N, N]
     return unnormalized_adj
 
+def top_bottom_eigenpairs(L, k1=10, k2=10):
+    # Convert to scipy sparse matrix
+    if isinstance(L, torch.Tensor):
+        L = L.detach().cpu()
+        L = sp.csr_matrix(L)
 
+    n = L.shape[0]
+    eigenvals = []
+    eigenvecs = []
+
+    # Bottom k2 (smallest eigenvalues)
+    if k2 > 0:
+        X = np.random.randn(n, k2)
+        vals, vecs = lobpcg(L, X, largest=False, maxiter=50, tol=1e-4)
+        eigenvals.append(vals)
+        eigenvecs.append(vecs)
+
+    # Top k1 (largest eigenvalues)
+    if k1 > 0:
+        X = np.random.randn(n, k1)
+        vals, vecs = lobpcg(L, X, largest=True, maxiter=50, tol=1e-4)
+        eigenvals.append(vals)
+        eigenvecs.append(vecs)
+
+    # Concatenate
+    eigenvals = np.concatenate(eigenvals)
+    eigenvecs = np.concatenate(eigenvecs, axis=1)
+
+    return torch.from_numpy(eigenvals), torch.from_numpy(eigenvecs)
