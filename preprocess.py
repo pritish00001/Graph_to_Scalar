@@ -97,3 +97,35 @@ def scale_dataloaders(train_loader, test_loader, device='cpu'):
         test_loader_scaled = torch.utils.data.DataLoader(test_scaled, batch_size=64, shuffle=False)
 
     return train_loader_scaled, test_loader_scaled, scaler
+
+
+def preprocess_graph_list_inplace(graph_list, strategy='mean', device='cuda'):
+    """
+    In-place preprocess node features of a list of PyG graphs.
+    Edge weights are left as-is.
+
+    Parameters
+    ----------
+    graph_list : list of torch_geometric.data.Data
+    strategy : str ('mean', 'median', 'zero')
+    device : str or torch.device
+
+    Returns
+    -------
+    x_scaler : fitted scaler for node features
+    """
+    # 1) Gather all node features into one big tensor
+    x_all = torch.cat([g.x.to(device) for g in graph_list], dim=0)
+
+    # 2) Preprocess node features (returns X_proc of same shape, plus scaler)
+    X_proc, x_scaler = preprocess_features(x_all, strategy=strategy, device=device)
+
+    # 3) Write back into each graph x, leave edge_weight alone
+    offset = 0
+    for g in graph_list:
+        n_nodes = g.x.size(0)
+        # overwrite g.x with the corresponding slice
+        g.x = X_proc[offset : offset + n_nodes]
+        offset += n_nodes
+
+    return x_scaler
