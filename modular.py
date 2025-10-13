@@ -12,7 +12,7 @@ from utils import *
 
 warnings.filterwarnings("ignore", category=UserWarning, module="scipy")
 
-
+#change stiffness to y
 # Custom Dataset Class
 class GraphEigenDataset(Dataset):
     def __init__(self, graph_list, K1, K2, transform=None, pre_transform=None):
