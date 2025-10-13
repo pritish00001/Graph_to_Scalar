@@ -45,6 +45,7 @@ class GraphEigenDataset(Dataset):
         # Attach new attributes to Data object
         graph.eigenvecs = eigenvecs #same as u matrix
         graph.eigenvals = eigenvals
+        graph.y = graph.stiffness  
 
         return graph 
     

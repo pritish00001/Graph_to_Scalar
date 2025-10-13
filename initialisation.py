@@ -1,8 +1,12 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_scatter
+from torch_geometric.data import Batch
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
 
-from utils import laplacian_eigen_decomposition, normalized_laplacian
 
 class GraphModel(nn.Module):
     def __init__(self, input_dim=5, hidden_dim=64, output_dim=1):
@@ -17,150 +21,227 @@ class GraphModel(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim // 2, output_dim)
         )
-        
-    def forward(self, X):
-        node_embeddings = self.mlp1(X)          # [N, 64]
-        graph_embedding = node_embeddings.mean(dim=0)  # [64]
-        y_hat = self.mlp2(graph_embedding)      # [output_dim]
-        return y_hat
-    
-def train_models(X_real_list, y_list):
-    
-    all_models = []
-    all_losses = []
 
+    def forward(self, batch):
+        """
+        batch: a PyG Batch object
+        batch.x -> node features of all graphs concatenated [total_nodes, input_dim]
+        batch.batch -> graph assignment vector [total_nodes], tells which graph each node belongs to
+        """
+        node_embeddings = self.mlp1(batch.x)  # [total_nodes, hidden_dim]
+        
+        # Aggregate node embeddings per graph (mean pooling)
+        graph_embeddings = torch_scatter.scatter_mean(
+            node_embeddings, batch.batch, dim=0
+        )  # [num_graphs_in_batch, hidden_dim]
+        
+        y_hat = self.mlp2(graph_embeddings)  # [num_graphs_in_batch, output_dim]
+        return y_hat.squeeze(-1)  # make shape [num_graphs_in_batch]
+
+
+def train_model(dataloader, input_dim=5, hidden_dim=64, output_dim=1, lr=0.01, epochs=20):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    model = GraphModel(input_dim, hidden_dim, output_dim).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.MSELoss()
 
-    for i in range(len(X_real_list)):
-        # Create a new model for each graph
-        model = GraphModel()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-        
-        # Prepare data
-        X = X_real_list[i]
-        y_true = torch.tensor([y_list[i]], dtype=torch.float32)
-        
-        # Quick training
-        for _ in range(50):
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0.0
+
+        for batch in dataloader:
+            batch = batch.to(device)
             optimizer.zero_grad()
-            y_hat = model(X)
+
+            y_hat = model(batch)                  # [batch_size]
+            y_true = batch.y.view(-1).float()     # [batch_size]
+
             loss = criterion(y_hat, y_true)
             loss.backward()
             optimizer.step()
+
+            total_loss += loss.item() * batch.num_graphs
         
-        all_models.append(model)
-        all_losses.append(loss.item())
+        avg_loss = total_loss / len(dataloader.dataset)
+        print(f"Epoch [{epoch+1}/{epochs}]  Loss: {avg_loss:.4f}")
+    
+    return model
 
-    print(f"Trained {len(all_models)} models")
-    return all_models, all_losses
-
-def refine_all_X(all_models, X_list, y_list, n_list, R=0.7, r = 0.8, epochs=100, lr=0.1):
+def refine_all_X(model, dataloader, n_syn, epochs=100, lr=0.1, device=None):
     """
+    Refines synthetic node features for graphs in a dataloader using a single GraphModel.
+
     Args:
-        all_models: list of trained GraphModel instances
-        X_list: list of node feature tensors
-        y_list: list of scalar targets (floats)
-        n_list: list of number of nodes (ints)
-        R: scaling factor for synthetic node count
+        model: trained GraphModel (expects PyG Batch input)
+        dataloader: DataLoader yielding batches of PyG Data objects
+        n_syn: fixed number of synthetic nodes per graph
         epochs: number of refinement steps
-        lr: learning rate for updating X
+        lr: learning rate for updating synthetic X
+        device: torch device
 
     Returns:
-        refined_X_list: list of refined synthetic node feature tensors
-        final_preds: list of final predictions
+        refined_X: tensor of shape [total_graphs, n_syn, input_dim]
+        final_preds: tensor of shape [total_graphs]
     """
     criterion = nn.MSELoss()
+
+    if device is None:
+        device = next(model.parameters()).device
+
+    model.eval()
+
     refined_X_list = []
-    final_preds = []
-    k1_list = []
-    k2_list = []
+    final_preds_list = []
 
-    for i, model in enumerate(all_models):
-        n = n_list[i]
-        d = X_list[i].shape[1]      # feature dimension
-        n_syn = int(R * n)
+    for batch in dataloader:
+        batch = batch.to(device)
+        y_batch = batch.y.view(-1).float()  # [num_graphs]
+        input_dim = batch.x.shape[1]
 
-        K1 = int(r*n_syn)
-        K2 = int((1-r)*n_syn)
-
-        k1_list.append(K1)
-        k2_list.append(K2)
-
-        y_target = torch.tensor([y_list[i]], dtype=torch.float32)
+        n_graphs = y_batch.size(0)
 
         # initialize synthetic node features
-        X_syn = torch.randn(n_syn, d, requires_grad=True)
+        X_syn = torch.randn(n_graphs * n_syn, input_dim, requires_grad=True, device=device)
+
+        # batch assignment for synthetic nodes
+        batch_vec = torch.arange(n_graphs, device=device).repeat_interleave(n_syn)
 
         optimizer_X = torch.optim.SGD([X_syn], lr=lr)
 
         for epoch in range(epochs):
             optimizer_X.zero_grad()
-            y_hat = model(X_syn)
-            loss = criterion(y_hat, y_target)
+            syn_batch = Batch(x=X_syn, batch=batch_vec, y=y_batch)
+            preds = model(syn_batch)
+            loss = criterion(preds, y_batch)
             loss.backward()
             optimizer_X.step()
 
-        refined_X_list.append(X_syn.detach())
-        final_preds.append(y_hat.detach())
+        # save refined X and predictions as tensors
+        refined_X_batch = torch.stack([X_syn[batch_vec == i] for i in range(n_graphs)], dim=0)  # [B, n_syn, input_dim]
+        refined_X_list.append(refined_X_batch)
+        final_preds_list.append(preds.detach())
 
-    return refined_X_list, k1_list, k2_list, final_preds
+    # concatenate batches along graph dimension
+    refined_X = torch.cat(refined_X_list, dim=0)         # [total_graphs, n_syn, input_dim]
+    final_preds = torch.cat(final_preds_list, dim=0)     # [total_graphs]
 
-def build_adjacency(X, Z):
+    return refined_X, final_preds
+
+# -----------------------------
+# 1️⃣ Build adjacency matrix
+# -----------------------------
+def batch_build_topk_adjacency(X: torch.Tensor, Z: int):
     """
+    Build batched top-Z adjacency matrix using cosine similarity.
+
     Args:
-        X: Node feature matrix [N, d]
-        Z: Number of top connections to keep per node (including self)
+        X: [B, N, d] node features
+        Z: number of top connections per node
+
     Returns:
-        A: Binary adjacency matrix [N, N]
+        A: [B, N, N] adjacency matrix
     """
-    # Normalize node features (for cosine similarity)
-    X_norm = F.normalize(X, p=2, dim=1)  # [N, d]
-    
-    # Cosine similarity matrix
-    sim_matrix = X_norm @ X_norm.T       # [N, N]
-    # print("Similarity matrix:\n", sim_matrix)
-    # Initialize adjacency
+    B, N, d = X.shape
+    device = X.device
+
+    X_norm = F.normalize(X, p=2, dim=2)          # [B, N, d]
+    sim_matrix = X_norm @ X_norm.transpose(1, 2) # [B, N, N]
+
+    topk_vals, topk_idx = torch.topk(sim_matrix, k=Z, dim=2)
     A = torch.zeros_like(sim_matrix)
-    
-    # For each row, pick top Z indices (including self)
-    topk = torch.topk(sim_matrix, k=Z, dim=1)
-    rows = torch.arange(X.shape[0]).unsqueeze(1).expand(-1, Z)
-    A[rows, topk.indices] = 1
-    
+    batch_idx = torch.arange(B, device=device)[:, None, None].expand(-1, N, Z)
+    node_idx = torch.arange(N, device=device)[None, :, None].expand(B, -1, Z)
+    A[batch_idx, node_idx, topk_idx] = 1
+
     return A
 
-if __name__ == "__main__":
+# -----------------------------
+# 2️⃣ Build normalized Laplacian
+# -----------------------------
+def batch_compute_normalized_laplacian(A):
+    """
+    Compute normalized Laplacian for batched adjacency matrices A.
+    A: [B, N, N]
+    Returns L: [B, N, N]
+    """
+    device = A.device
+    B, N, _ = A.shape
+
+    # Degree matrix per batch
+    deg = A.sum(dim=-1)  # [B, N]
+    D_inv_sqrt = torch.pow(deg, -0.5)
+    D_inv_sqrt[torch.isinf(D_inv_sqrt)] = 0.0  # handle isolated nodes
+
+    # Compute normalized Laplacian
+    I = torch.eye(N, device=device).unsqueeze(0).expand(B, N, N)  # [B, N, N]
+    L = I - D_inv_sqrt[:, :, None] * A * D_inv_sqrt[:, None, :]  # broadcast correctly
+    return L
+
+# -----------------------------
+# 3️⃣ Eigen-decomposition
+# -----------------------------
+def batch_compute_eigen(L: torch.Tensor, K1: int, K2: int):
+    """
+    Compute top K1+K2 eigenvectors and all eigenvalues for a batch of Laplacians.
+
+    Args:
+        L: [B, N, N] Laplacian matrix
+        K1, K2: number of eigenvectors to keep
+
+    Returns:
+        U_all: [B, N, K1+K2] eigenvectors
+        eigvals_all: [B, N] eigenvalues
+    """
+    B, N, _ = L.shape
+    U_list = []
+    eigvals_list = []
+    for i in range(B):
+        eigvals, eigvecs = torch.linalg.eigh(L[i])
+        U_list.append(eigvecs[:, :K1+K2])
+        eigvals_list.append(eigvals)
+    U_all = torch.stack(U_list, dim=0)
+    eigvals_all = torch.stack(eigvals_list, dim=0)
+    return U_all, eigvals_all
+
+# -----------------------------
+# 4️⃣ Create dataloader
+# -----------------------------
+def create_dataloader(X, U, eigvals, batch_size=1, shuffle=False, save_dir=None):
+    """
+    Create and optionally save a PyG DataLoader from tensors.
+
+    Args:
+        X: [B, N, d] node features
+        U: [B, N, K1+K2] eigenvectors
+        eigvals: [B, N] eigenvalues
+        batch_size: batch size
+        shuffle: shuffle dataset
+        save_dir: optional path to save the dataset (as .pt)
+
+    Returns:
+        DataLoader object
+    """
+    data_list = []
+
+    B, N, d = X.shape
+    for i in range(B):
+        Xi = X[i]
+        Ui = U[i]
+        eigvali = eigvals[i]
+        data = Data(x=Xi, u=Ui, eigval=eigvali)
+        data_list.append(data)
+
+    # ✅ Save dataset if a directory is given
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(data_list, os.path.join(save_dir, "dataset.pt"))
+        print(f"✅ Dataset saved at {os.path.join(save_dir, 'dataset.pt')}")
+
+    dataloader = DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
+    return dataloader
+
+
+
+
   
-    X_real_list = torch.load('X_real_list.pt')
-    y_list = torch.load('y_list.pt')
-    all_models = train_models(X_real_list, y_list)
-    n_list = [X.shape[0] for X in X_real_list]
-    X_syn_list, K1_list, K2_list, final_preds = refine_all_X(
-    all_models, X_real_list, y_list, n_list=n_list, epochs=100, lr=0.05
-)
-    Z = 70           # Keep top 40 neighbors per node (including self)
-    A_syn_list = []
-    for i in range(len(X_syn_list)):
-        X = X_syn_list[i]
-        A = build_adjacency(X, Z)
-        A_syn_list.append(A)
-
-    print("Adjacency matrix:\n", A_syn_list[0].shape)
-    print("Adjacency matrix:\n", A_syn_list[0])
-
-    U_syn_list = []
-    for i in range(len(A_syn_list)):
-        L = normalized_laplacian(A_syn_list[i])
-        U = laplacian_eigen_decomposition(L, K1_list[i], K2_list[i])
-        U_syn_list.append(U)
-
-
-    data_to_save = {
-        "U_syn_list": U_syn_list,
-        "X_syn_list": X_syn_list,
-        "K1_list": K1_list,
-        "K2_list": K2_list,
-    }
-
-    torch.save(data_to_save, "graph_data_1.pt")
-    print("Data saved to graph_data_1.pt")
