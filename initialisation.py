@@ -239,7 +239,7 @@ def create_dataloader(X, U, eigvals, batch_size=1, shuffle=False, save_dir=None)
         print(f"✅ Dataset saved at {os.path.join(save_dir, 'dataset.pt')}")
 
     dataloader = DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
-    return dataloader
+    return dataloader, data_list
 
 
 
