@@ -128,3 +128,106 @@ def coupled_training(
 
     print("\n=== Coupled Training Fully Complete ===")
     return final_avg_Le, final_avg_Lo, final_avg_Lr
+
+def coupled_training_dataloaders(
+    GNN_model: torch.nn.Module,
+    train_real_loader,   # DataLoader for real graphs
+    synthetic_graph_list,  # List[Data] of synthetic graphs, updated each epoch
+    x_optimizer: torch.optim.Optimizer,
+    u_optimizer: torch.optim.Optimizer,
+    gnn_optimizer: torch.optim.Optimizer,
+    alpha: float,
+    beta:  float,
+    gamma: float,
+    tau1:  int,
+    tau2:  int,
+    epochs: int,
+    K1: int,
+    K2: int,
+    batch_size: int = 8,
+    seed: int = 42
+):
+    """Coupled training with synthetic graphs recreated per epoch."""
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+    GNN_model = GNN_model.to(device)
+
+    le_total_all, lo_total_all, lr_total_all = 0.0, 0.0, 0.0
+    total_count = 0
+
+    for ep in range(1, epochs + 1):
+        epoch_start = time.perf_counter()
+        print(f"\n=== Epoch {ep}/{epochs} | Phase 1: Distillation (τ₁={tau1}) ===")
+        GNN_model.eval()
+
+        # 🔄 Recreate synthetic DataLoader each epoch
+        train_syn_loader = DataLoader(synthetic_graph_list, batch_size=batch_size, shuffle=True)
+
+        for t in range(tau1):
+            print(f"\n-- Distillation Round {t+1}/{tau1} --")
+
+            le_total, lo_total, lr_total = 0.0, 0.0, 0.0
+            count = 0
+
+            for (real_batch, syn_batch) in zip(train_real_loader, train_syn_loader):
+                real_batch = real_batch.to(device)
+                syn_batch = syn_batch.to(device)
+
+                x_optimizer.zero_grad()
+                u_optimizer.zero_grad()
+
+                # Regression loss on synthetic batch
+                y_pred = GNN_model(syn_batch.x, syn_batch.edge_index, syn_batch.batch)
+                Lr = Losses.regression_loss(y_pred, real_batch.y)
+
+                # Eigen alignment + orthogonality
+                Le = Losses.eigen_alignment_loss(
+                    X_real=real_batch.x,
+                    U_real=real_batch.eigenvecs,
+                    X_syn=syn_batch.x,
+                    U_syn=syn_batch.eigenvecs,
+                    K1=K1,
+                    K2=K2
+                )
+                Lo = Losses.orthogonality_loss(syn_batch.eigenvecs)
+
+                # Weighted synthetic loss
+                Lsyn = Losses.synthetic_graph_loss(Le, Lo, Lr, alpha, beta, gamma)
+                Lsyn.backward()
+
+                x_optimizer.step()
+                u_optimizer.step()
+
+                # Accumulate
+                bs = syn_batch.num_graphs
+                le_total += Le.item() * bs
+                lo_total += Lo.item() * bs
+                lr_total += Lr.item() * bs
+                count += bs
+
+            avg_Le = le_total / count
+            avg_Lo = lo_total / count
+            avg_Lr = lr_total / count
+            print(f"Summary — Round {t+1}/{tau1}: "
+                  f"Avg Le={avg_Le:.6f}, Avg Lo={avg_Lo:.6f}, Avg Lr={avg_Lr:.6f}")
+
+            le_total_all += le_total
+            lo_total_all += lo_total
+            lr_total_all += lr_total
+            total_count += count
+
+        epoch_time = time.perf_counter() - epoch_start
+        print(f"\n=== Epoch {ep} Completed — Time: {epoch_time:.2f} sec ===\n")
+
+    final_avg_Le = le_total_all / total_count
+    final_avg_Lo = lo_total_all / total_count
+    final_avg_Lr = lr_total_all / total_count
+
+    print("\n=== Coupled Training Fully Complete ===")
+    print(f"Final Avg Le={final_avg_Le:.6f}, Lo={final_avg_Lo:.6f}, Lr={final_avg_Lr:.6f}")
+
+    return final_avg_Le, final_avg_Lo, final_avg_Lr
