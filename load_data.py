@@ -23,8 +23,8 @@ def load_train_data_as_list():
         individual_graphs = [graph.to(device) for graph in individual_graphs]
         individual_list_of_training_graphs.extend(individual_graphs)
 
-    for g in individual_list_of_training_graphs:
-        g.y = g.stiffness
-        del g.stiffness  # optional but cleaner
-
+    # for g in individual_list_of_training_graphs:
+    #     g.y = g.stiffness
+    #     del g.stiffness  # optional but cleaner
+    # added in data object in modular.py
     return individual_list_of_training_graphs
