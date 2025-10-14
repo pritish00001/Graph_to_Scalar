@@ -161,9 +161,6 @@ def coupled_training_dataloaders(
     total_count = 0
     eigenval_list = [g.eigenvals for g in train_dataset]  # each graph's eigenvalues
 
-    K1_list = [K1] * len(synthetic_graph_list)
-    K2_list = [K2] * len(synthetic_graph_list)
-
     for ep in range(1, epochs + 1):
         epoch_start = time.perf_counter()
         print(f"\n=== Epoch {ep}/{epochs} | Phase 1: Distillation (τ₁={tau1}) ===")
@@ -205,7 +202,7 @@ def coupled_training_dataloaders(
                     batch_real=real_batch.batch,
                     batch_syn=syn_batch.batch
                 )
-                Lo = Losses.orthogonality_loss(syn_batch.u)
+                Lo = Losses.orthogonality_loss_concatenated(syn_batch.u, syn_batch.batch)
 
                 # Weighted synthetic loss
                 Lsyn = Losses.synthetic_graph_loss(Le, Lo, Lr, alpha, beta, gamma)

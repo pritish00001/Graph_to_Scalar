@@ -193,7 +193,7 @@ final_Le, final_Lo, final_Lr = coupled_training_dataloaders(
 # =======================
 # 8️⃣ Save final trained GNN
 # =======================
-final_model_path = os.path.join(SAVE_DIR, "final_GNN_model.pt")
+final_model_path = os.path.join(SAVE_DIR, "dist_model.pt")
 torch.save(GNN_model.state_dict(), final_model_path)
 print(f"\n✅ Coupled training complete. Model saved at: {final_model_path}")
 print(f"Final Avg Losses — Le={final_Le:.6f}, Lo={final_Lo:.6f}, Lr={final_Lr:.6f}")
