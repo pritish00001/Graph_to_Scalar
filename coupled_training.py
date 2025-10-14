@@ -131,21 +131,22 @@ def coupled_training(
 
 def coupled_training_dataloaders(
     GNN_model: torch.nn.Module,
-    train_real_loader,   # DataLoader for real graphs
+    train_dataset,   # Dataset for real graphs
     synthetic_graph_list,  # List[Data] of synthetic graphs, updated each epoch
     x_optimizer: torch.optim.Optimizer,
     u_optimizer: torch.optim.Optimizer,
-    gnn_optimizer: torch.optim.Optimizer,
+    # gnn_optimizer: torch.optim.Optimizer,
     alpha: float,
     beta:  float,
     gamma: float,
     tau1:  int,
-    tau2:  int,
+    # tau2:  int,
     epochs: int,
     K1: int,
     K2: int,
     batch_size: int = 8,
-    seed: int = 42
+    seed: int = 42,
+    threshold: float = 0.01
 ):
     """Coupled training with synthetic graphs recreated per epoch."""
 
@@ -158,15 +159,26 @@ def coupled_training_dataloaders(
 
     le_total_all, lo_total_all, lr_total_all = 0.0, 0.0, 0.0
     total_count = 0
+    eigenval_list = [g.eigenvals for g in train_dataset]  # each graph's eigenvalues
+
+    K1_list = [K1] * len(synthetic_graph_list)
+    K2_list = [K2] * len(synthetic_graph_list)
 
     for ep in range(1, epochs + 1):
         epoch_start = time.perf_counter()
         print(f"\n=== Epoch {ep}/{epochs} | Phase 1: Distillation (τ₁={tau1}) ===")
         GNN_model.eval()
+        # 🔄 Recreate synthetic graphs each epoch with updated X, U
+        for i, g in enumerate(synthetic_graph_list):
+            adj = create_adj_prime(U=g.u, k1=K1, k2=K2, eigenvals=eigenval_list[i])
+            edge_index, edge_weight = create_edge_index_using_adjacency_matrix(adj, threshold=threshold)
+            
+            g.edge_index = edge_index
+            g.edge_weight = edge_weight
 
         # 🔄 Recreate synthetic DataLoader each epoch
         train_syn_loader = DataLoader(synthetic_graph_list, batch_size=batch_size, shuffle=True)
-
+        train_real_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
         for t in range(tau1):
             print(f"\n-- Distillation Round {t+1}/{tau1} --")
 
@@ -182,18 +194,18 @@ def coupled_training_dataloaders(
 
                 # Regression loss on synthetic batch
                 y_pred = GNN_model(syn_batch.x, syn_batch.edge_index, syn_batch.batch)
-                Lr = Losses.regression_loss(y_pred, real_batch.y)
+                Lr = Losses.regression_loss(y_pred, real_batch.y.view(-1).float())
 
                 # Eigen alignment + orthogonality
-                Le = Losses.eigen_alignment_loss(
+                Le = Losses.eigen_alignment_loss_concatenated(
                     X_real=real_batch.x,
                     U_real=real_batch.eigenvecs,
                     X_syn=syn_batch.x,
-                    U_syn=syn_batch.eigenvecs,
-                    K1=K1,
-                    K2=K2
+                    U_syn=syn_batch.u,
+                    batch_real=real_batch.batch,
+                    batch_syn=syn_batch.batch
                 )
-                Lo = Losses.orthogonality_loss(syn_batch.eigenvecs)
+                Lo = Losses.orthogonality_loss(syn_batch.u)
 
                 # Weighted synthetic loss
                 Lsyn = Losses.synthetic_graph_loss(Le, Lo, Lr, alpha, beta, gamma)

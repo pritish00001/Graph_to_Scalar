@@ -207,14 +207,13 @@ def batch_compute_eigen(L: torch.Tensor, K1: int, K2: int):
 # -----------------------------
 # 4️⃣ Create dataloader
 # -----------------------------
-def create_dataloader(X, U, eigvals, batch_size=1, shuffle=False, save_dir=None):
+def create_dataloader_and_save_list(X, U, batch_size=1, shuffle=False, save_dir=None):
     """
     Create and optionally save a PyG DataLoader from tensors.
 
     Args:
         X: [B, N, d] node features
         U: [B, N, K1+K2] eigenvectors
-        eigvals: [B, N] eigenvalues
         batch_size: batch size
         shuffle: shuffle dataset
         save_dir: optional path to save the dataset (as .pt)
@@ -228,15 +227,14 @@ def create_dataloader(X, U, eigvals, batch_size=1, shuffle=False, save_dir=None)
     for i in range(B):
         Xi = X[i]
         Ui = U[i]
-        eigvali = eigvals[i]
-        data = Data(x=Xi, u=Ui, eigval=eigvali)
+        data = Data(x=Xi, u=Ui)
         data_list.append(data)
 
     # ✅ Save dataset if a directory is given
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
-        torch.save(data_list, os.path.join(save_dir, "dataset.pt"))
-        print(f"✅ Dataset saved at {os.path.join(save_dir, 'dataset.pt')}")
+        torch.save(data_list, os.path.join(save_dir, "syn_init_dataset.pt"))
+        print(f"✅ Dataset saved at {os.path.join(save_dir, 'syn_init_dataset.pt')}")
 
     dataloader = DataLoader(data_list, batch_size=batch_size, shuffle=shuffle)
     return dataloader, data_list
