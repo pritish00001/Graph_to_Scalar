@@ -66,7 +66,7 @@ print("Preprocessing complete.")
 # =======================
 # 2️⃣ Dataset and DataLoader
 # =======================
-K1, K2 = 10, 10
+K1, K2 = 40, 40
 dataset_path = os.path.join(SAVE_DIR, "train_dataset.pt")
 
 if os.path.exists(dataset_path):
@@ -184,7 +184,7 @@ final_Le, final_Lo, final_Lr = coupled_training_dataloaders(
     beta=1.0,
     gamma=1.0,
     tau1=1,
-    epochs=2,
+    epochs=1,
     K1=K1,
     K2=K2,
     batch_size=BATCH_SIZE

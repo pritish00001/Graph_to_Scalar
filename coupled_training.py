@@ -160,11 +160,13 @@ def coupled_training_dataloaders(
     le_total_all, lo_total_all, lr_total_all = 0.0, 0.0, 0.0
     total_count = 0
     eigenval_list = [g.eigenvals for g in train_dataset]  # each graph's eigenvalues
+    train_real_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
     for ep in range(1, epochs + 1):
         epoch_start = time.perf_counter()
         print(f"\n=== Epoch {ep}/{epochs} | Phase 1: Distillation (τ₁={tau1}) ===")
         GNN_model.eval()
+        
         # 🔄 Recreate synthetic graphs each epoch with updated X, U
         for i, g in enumerate(synthetic_graph_list):
             adj = create_adj_prime(U=g.u, k1=K1, k2=K2, eigenvals=eigenval_list[i])
@@ -175,7 +177,7 @@ def coupled_training_dataloaders(
 
         # 🔄 Recreate synthetic DataLoader each epoch
         train_syn_loader = DataLoader(synthetic_graph_list, batch_size=batch_size, shuffle=True)
-        train_real_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
         for t in range(tau1):
             print(f"\n-- Distillation Round {t+1}/{tau1} --")
 
