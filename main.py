@@ -26,6 +26,7 @@ from preprocess import preprocess_graph_list_inplace
 from models import GNN
 from coupled_training import coupled_training_dataloaders
 from losses import Losses
+from train import train_with_config_dataloader, tune_hyperparameter_dataloader
 
 # =======================
 # Setup
@@ -161,39 +162,69 @@ else:
 # =======================
 # 6️⃣ Make synthetic tensors learnable
 # =======================
-for data in synthetic_graph_list:
-    data.x = nn.Parameter(data.x.clone().detach().requires_grad_(True))
-    data.u = nn.Parameter(data.u.clone().detach().requires_grad_(True))
+# for data in synthetic_graph_list:
+#     data.x = nn.Parameter(data.x.clone().detach().requires_grad_(True))
+#     data.u = nn.Parameter(data.u.clone().detach().requires_grad_(True))
 
-x_optimizer = torch.optim.Adam([d.x for d in synthetic_graph_list], lr=1e-3)
-u_optimizer = torch.optim.Adam([d.u for d in synthetic_graph_list], lr=1e-3)
+# x_optimizer = torch.optim.Adam([d.x for d in synthetic_graph_list], lr=1e-3)
+# u_optimizer = torch.optim.Adam([d.u for d in synthetic_graph_list], lr=1e-3)
 
-# =======================
-# 7️⃣ Coupled training with GNN
-# =======================
+# # =======================
+# # 7️⃣ Coupled training with GNN
+# # =======================
 
-GNN_model = GNN().to(device)
+# GNN_model = GNN().to(device)
 
-final_Le, final_Lo, final_Lr = coupled_training_dataloaders(
-    GNN_model=GNN_model,
-    train_dataset=train_dataset,
+# final_Le, final_Lo, final_Lr = coupled_training_dataloaders(
+#     GNN_model=GNN_model,
+#     train_dataset=train_dataset,
+#     synthetic_graph_list=synthetic_graph_list,
+#     x_optimizer=x_optimizer,
+#     u_optimizer=u_optimizer,
+#     alpha=1.0,
+#     beta=1.0,
+#     gamma=1.0,
+#     tau1=1,
+#     epochs=1,
+#     K1=K1,
+#     K2=K2,
+#     batch_size=BATCH_SIZE
+# )
+
+# # =======================
+# # 8️⃣ Save final trained GNN
+# # =======================
+# final_model_path = os.path.join(SAVE_DIR, "dist_model.pt")
+# torch.save(GNN_model.state_dict(), final_model_path)
+# print(f"\n✅ Coupled training complete. Model saved at: {final_model_path}")
+# print(f"Final Avg Losses — Le={final_Le:.6f}, Lo={final_Lo:.6f}, Lr={final_Lr:.6f}")
+
+default_config = {
+    'alpha': 1.0,
+    'beta': 1.0,
+    'gamma': 1.0,
+    'lr_x': 1e-3,
+    'lr_u': 1e-3,
+    'lr_gnn': 1e-3,
+    'hidden_dim': 64,
+    'dropout': 0.2,
+    'tau1': 1,
+    'tau2': 1,
+    'batch_size': BATCH_SIZE,
+    'epochs': 3
+}
+
+param_name = 'lr_gnn'
+param_values = [1e-4, 5e-4, 1e-3, 5e-3]
+
+best_X_syn, best_U_syn, histories = tune_hyperparameter_dataloader(
+    param_name=param_name,
+    param_values=param_values,
+    default_config=default_config,
+    train_loader=train_loader,
+    test_loader=train_loader,  # replace with real test_loader if available
     synthetic_graph_list=synthetic_graph_list,
-    x_optimizer=x_optimizer,
-    u_optimizer=u_optimizer,
-    alpha=1.0,
-    beta=1.0,
-    gamma=1.0,
-    tau1=1,
-    epochs=1,
+    device=device,
     K1=K1,
-    K2=K2,
-    batch_size=BATCH_SIZE
+    K2=K2
 )
-
-# =======================
-# 8️⃣ Save final trained GNN
-# =======================
-final_model_path = os.path.join(SAVE_DIR, "dist_model.pt")
-torch.save(GNN_model.state_dict(), final_model_path)
-print(f"\n✅ Coupled training complete. Model saved at: {final_model_path}")
-print(f"Final Avg Losses — Le={final_Le:.6f}, Lo={final_Lo:.6f}, Lr={final_Lr:.6f}")
