@@ -5,12 +5,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import joblib
-from torch_geometric.data import Data, DataLoader
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader
 from torch.serialization import add_safe_globals
-
+from IPython.display import Image, display
+import torch.optim as optim
 # =======================
 # Import your modules
 # =======================
+from evaluation import evaluate_trained_model_on_dataset, train_synthetic_gnn
 from initialisation import (
     batch_build_topk_adjacency,
     batch_compute_eigen,
@@ -159,46 +162,6 @@ else:
     torch.save(synthetic_graph_list, synthetic_list_path)
     print("Synthetic graphs created and saved.")
 
-# =======================
-# 6️⃣ Make synthetic tensors learnable
-# =======================
-# for data in synthetic_graph_list:
-#     data.x = nn.Parameter(data.x.clone().detach().requires_grad_(True))
-#     data.u = nn.Parameter(data.u.clone().detach().requires_grad_(True))
-
-# x_optimizer = torch.optim.Adam([d.x for d in synthetic_graph_list], lr=1e-3)
-# u_optimizer = torch.optim.Adam([d.u for d in synthetic_graph_list], lr=1e-3)
-
-# # =======================
-# # 7️⃣ Coupled training with GNN
-# # =======================
-
-# GNN_model = GNN().to(device)
-
-# final_Le, final_Lo, final_Lr = coupled_training_dataloaders(
-#     GNN_model=GNN_model,
-#     train_dataset=train_dataset,
-#     synthetic_graph_list=synthetic_graph_list,
-#     x_optimizer=x_optimizer,
-#     u_optimizer=u_optimizer,
-#     alpha=1.0,
-#     beta=1.0,
-#     gamma=1.0,
-#     tau1=1,
-#     epochs=1,
-#     K1=K1,
-#     K2=K2,
-#     batch_size=BATCH_SIZE
-# )
-
-# # =======================
-# # 8️⃣ Save final trained GNN
-# # =======================
-# final_model_path = os.path.join(SAVE_DIR, "dist_model.pt")
-# torch.save(GNN_model.state_dict(), final_model_path)
-# print(f"\n✅ Coupled training complete. Model saved at: {final_model_path}")
-# print(f"Final Avg Losses — Le={final_Le:.6f}, Lo={final_Lo:.6f}, Lr={final_Lr:.6f}")
-
 default_config = {
     'alpha': 1.0,
     'beta': 1.0,
@@ -211,12 +174,15 @@ default_config = {
     'tau1': 1,
     'tau2': 1,
     'batch_size': BATCH_SIZE,
-    'epochs': 3
+    'epochs': 3,
+    'threshold': 1e-6
 }
 
 param_name = 'lr_gnn'
-param_values = [1e-4, 5e-4, 1e-3, 5e-3]
+param_values = [1e-4]
 
+# =======================
+# 9️⃣ Hyperparameter tuning
 best_X_syn, best_U_syn, histories = tune_hyperparameter_dataloader(
     param_name=param_name,
     param_values=param_values,
@@ -228,3 +194,31 @@ best_X_syn, best_U_syn, histories = tune_hyperparameter_dataloader(
     K1=K1,
     K2=K2
 )
+print(f"\n✅ Hyperparameter tuning complete. Best {param_name} found.")
+# =======================
+
+# 10️⃣ Final training on synthetic data and evaulation
+model = GNN().to(device)
+optimizer = optim.Adam(model.parameters(), lr=default_config['lr_gnn'])
+
+# === Train ===
+trained_model, train_loader = train_synthetic_gnn(
+        model=model,
+        optimizer=optimizer,
+        synthetic_graph_list=synthetic_graph_list,
+        train_dataset=train_dataset,
+        default_config=default_config,
+        K1=K1,
+        K2=K2,
+    )
+# === Evaluate ===
+mse_real, preds, trues = evaluate_trained_model_on_dataset(
+        model=trained_model,
+        dataset=train_dataset,
+        device=device,
+        scatter_title='Train Real Graphs: True vs Predicted',
+        scatter_filename='true_vs_pred_scatter_real.png'
+    )
+
+print(f"\n✅ Final Evaluation Complete! MSE = {mse_real:.6f}")
+display(Image(filename='true_vs_pred_scatter_real.png'))

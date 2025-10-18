@@ -1,10 +1,13 @@
+import os
 import torch
 import time
 import random
 from typing import List
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
+import torch.nn as nn
 from losses import Losses
+from models import GNN
 from utils import create_adj_prime, create_edge_index_using_adjacency_matrix
 
 def make_data(i, X_syn_list, U_syn_list, eigenval_list, y_tensor, K1_list, K2_list, threshold):
@@ -242,3 +245,53 @@ def coupled_training_dataloaders(
     print(f"Final Avg Le={final_avg_Le:.6f}, Lo={final_avg_Lo:.6f}, Lr={final_avg_Lr:.6f}")
 
     return final_avg_Le, final_avg_Lo, final_avg_Lr
+
+
+if __name__ == "__main__":
+        
+    # =======================
+    # 6️⃣ Make synthetic tensors learnable
+    # =======================
+    synthetic_graph_list = []
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    K1 = 10
+    K2 = 10
+    train_dataset = None  # Assume this is defined elsewhere
+    BATCH_SIZE = 16
+    for data in synthetic_graph_list:
+        data.x = nn.Parameter(data.x.clone().detach().requires_grad_(True))
+        data.u = nn.Parameter(data.u.clone().detach().requires_grad_(True))
+
+    x_optimizer = torch.optim.Adam([d.x for d in synthetic_graph_list], lr=1e-3)
+    u_optimizer = torch.optim.Adam([d.u for d in synthetic_graph_list], lr=1e-3)
+
+    # =======================
+    # 7️⃣ Coupled training with GNN
+    # =======================
+
+    GNN_model = GNN().to(device)
+
+    final_Le, final_Lo, final_Lr = coupled_training_dataloaders(
+        GNN_model=GNN_model,
+        train_dataset=train_dataset,
+        synthetic_graph_list=synthetic_graph_list,
+        x_optimizer=x_optimizer,
+        u_optimizer=u_optimizer,
+        alpha=1.0,
+        beta=1.0,
+        gamma=1.0,
+        tau1=1,
+        epochs=1,
+        K1=K1,
+        K2=K2,
+        batch_size=BATCH_SIZE
+    )
+
+    # =======================
+    # 8️⃣ Save final trained GNN
+    # =======================
+    SAVE_DIR = "saved_data"
+    final_model_path = os.path.join(SAVE_DIR, "dist_model.pt")
+    torch.save(GNN_model.state_dict(), final_model_path)
+    print(f"\n✅ Coupled training complete. Model saved at: {final_model_path}")
+    print(f"Final Avg Losses — Le={final_Le:.6f}, Lo={final_Lo:.6f}, Lr={final_Lr:.6f}")

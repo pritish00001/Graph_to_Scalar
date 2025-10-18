@@ -7,46 +7,51 @@ from models import GNN
 from train import save_scatter
 import time
 import torch.optim as optim
-
 from utils import create_adj_prime, create_edge_index_using_adjacency_matrix
 
-def build_train_loader(x_syn_final, u_syn_final, eigenval_list, y_list, k1_list, k2_list, threshold, batch_size):
+def build_train_loader(synthetic_graph_list, train_dataset, K1, K2, threshold, batch_size):
     """
-    Build a PyTorch Geometric DataLoader for synthetic graphs.
+    Build a PyTorch Geometric DataLoader for synthetic graphs using synthetic graph list
+    and a precomputed GraphEigenDataset for eigenvalues, eigenvectors, and targets.
 
     Args:
-        x_syn_final: list of node feature tensors
-        u_syn_final: list of U tensors (eigenvectors)
-        eigenval_list: list of eigenvalue tensors
-        y_list: list of scalar targets
-        k1_list: list of k1 values
-        k2_list: list of k2 values
+        synthetic_graph_list: list of synthetic graphs (each with g.x and g.u)
+        train_dataset: GraphEigenDataset object (provides eigenvals, eigenvecs, y)
+        K1, K2: constants for eigen decomposition
         threshold: threshold for edge creation
-        batch_size: batch size for DataLoader
+        batch_size: DataLoader batch size
 
     Returns:
         train_loader: DataLoader for all synthetic graphs
     """
     data_list = []
 
-    for i in range(len(x_syn_final)):
-        Xi = x_syn_final[i]
-        Ui = u_syn_final[i]
-        evals = eigenval_list[i]
-        k1 = k1_list[i]
-        k2 = k2_list[i]
+    for i, g_syn in enumerate(synthetic_graph_list):
+        # Get corresponding graph from train dataset
+        g_real = train_dataset.get(i)
+        
+        # Extract synthetic features and eigenvectors
+        X_syn = g_syn.x
+        U_syn = g_syn.u
 
-        adj = create_adj_prime(U=Ui, k1=k1, k2=k2, eigenvals=evals)
+        # Extract eigenvals and target from the real dataset
+        eigenvals = g_real.eigenvals
+        y_target = torch.tensor([float(g_real.y)], dtype=torch.float)
+
+        # Build adjacency and edge index
+        adj = create_adj_prime(U=U_syn, k1=K1, k2=K2, eigenvals=eigenvals)
         edge_index, edge_weight = create_edge_index_using_adjacency_matrix(adj, threshold=threshold)
 
+        # Build graph data object
         data = Data(
-            x=Xi,
+            x=X_syn,
             edge_index=edge_index,
             edge_weight=edge_weight.to(torch.float),
-            y=torch.tensor([float(y_list[i])], dtype=torch.float)
+            y=y_target
         )
         data_list.append(data)
 
+    # Batch safely if dataset smaller than batch size
     train_loader = DataLoader(data_list, batch_size=min(batch_size, len(data_list)), shuffle=True)
     return train_loader
 
@@ -90,128 +95,164 @@ def evaluate_syn(preds, trues, device):
 
     return loss, preds, trues
 
-if __name__ == "__main__":
-    default_config = {}
-    x_syn_final = torch.load('x_syn_final.pt')
-    u_syn_final = torch.load('u_syn_final.pt')
-    eigen_vals_list = torch.load('eigen_vals_list.pt')
-    X_real_list = torch.load('X_real_list.pt')
-    y_list = torch.load('y_list.pt')
-    X_real_test_list = torch.load('X_real_test_list.pt')
-    y_test_list = torch.load('y_test_list.pt')
-    edge_index_list = torch.load('edge_index_list.pt')
-    edge_weight_list = torch.load('edge_weight_list.pt')
-    edge_index_test_list = torch.load('edge_index_test_list.pt')
-    edge_weight_test_list = torch.load('edge_weight_test_list.pt')
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    k1_syn_list = []
-    k2_syn_list = []
-    r = default_config['r']
-    for i in range(len(x_syn_final)):
-        Xi = x_syn_final[i]
-        n_syn, d = Xi.size()
-        K1 = int(r*n_syn)
-        K2 = int((1-r)*n_syn)
-        k1_syn_list.append(K1)
-        k2_syn_list.append(K2)
+def train_synthetic_gnn(
+    model,
+    optimizer,
+    synthetic_graph_list,
+    train_dataset,
+    default_config,
+    K1,
+    K2,
+):
+    """
+    Full training pipeline for synthetic GNN model using synthetic graphs
+    and precomputed real dataset eigen information.
 
-    # Build model
-    hidden_dim = default_config['hidden_dim']
-    dropout = default_config['dropout']
-    lr_gnn = default_config['lr_gnn']
+    Args:
+        model: an initialized (and possibly pre-trained) GNN model
+        optimizer: optimizer for the model
+        synthetic_graph_list: list of synthetic graphs (each with g.x, g.u)
+        train_dataset: GraphEigenDataset containing eigenvals, eigenvecs, y
+        default_config: dict with keys ['threshold', 'batch_size', 'epochs']
+        K1, K2: constants for eigen decomposition
+        device: 'cuda' or 'cpu'
+
+    Returns:
+        model: trained GNN model
+        train_loader: DataLoader used for training
+    """
+
     threshold = default_config['threshold']
     batch_size = default_config['batch_size']
+    epochs = default_config.get('epochs', 200)
 
-    epochs = 200
-
-    in_channels = x_syn_final[0].shape[1]
-    model_syn = GNN().to(device=device)
-    gnn_syn_opt = optim.Adam(model_syn.parameters(), lr=lr_gnn)
-
+    # ===== Build train DataLoader =====
     train_loader = build_train_loader(
-        x_syn_final, u_syn_final, eigen_vals_list, y_list, k1_syn_list, k2_syn_list, threshold, batch_size
+        synthetic_graph_list=synthetic_graph_list,
+        train_dataset=train_dataset,
+        K1=K1,
+        K2=K2,
+        threshold=threshold,
+        batch_size=batch_size
     )
 
-
-    start_time = time.time()  # start timer
+    # ===== Training Loop =====
+    start_time = time.time()
+    print("\n=== Starting Synthetic GNN Training ===")
 
     for ep in range(epochs):
-        print(f"{ep} done")
-        l = gnn_regression_step(
-            model_syn,
-            train_loader,
-            gnn_syn_opt
-        )
-        # print(l)
+        loss_val = gnn_regression_step(model, train_loader, optimizer)
+        print(f"Epoch [{ep+1}/{epochs}] | Loss: {loss_val:.6f}")
 
-    end_time = time.time()  # end timer
+    # ===== Timing Summary =====
+    end_time = time.time()
     elapsed = end_time - start_time
+    print("\n=== Training Complete ===")
     print(f"Total training time: {elapsed:.2f} seconds")
-    print(f"Average time per epoch: {elapsed/epochs:.4f} seconds")
+    print(f"Average time per epoch: {elapsed/epochs:.4f} seconds\n")
 
-    y_pred_real = []
+    return model, train_loader
 
-    for i in range(len(X_real_list)):
-        Xi = X_real_list[i]
-        edge_index = edge_index_list[i]
-        edge_weight = edge_weight_list[i]
-        edge_weight = edge_weight.to(torch.float)
-        batch = torch.zeros(Xi.size(0), dtype=torch.long, device=Xi.device)
+def evaluate_trained_model_on_dataset(
+    model,
+    dataset,
+    device,
+    scatter_title='True vs Predicted',
+    scatter_filename='true_vs_pred_scatter.png'
+):
+    """
+    Evaluate a trained GNN model on a given GraphEigenDataset.
 
-        # y_pred_test_real.append(model_syn(Xi, edge_index, batch, edge_weight))
-        y_pred_real.append(model_syn(Xi, edge_index, batch))
+    Args:
+        model: trained GNN model
+        dataset: GraphEigenDataset object containing graph_list with .x, .edge_index, .edge_weight, .y
+        device: torch device ('cpu' or 'cuda')
+        scatter_title: title for scatter plot
+        scatter_filename: filename to save the scatter plot image
 
-    for i in range(len(y_pred_real)):
-        print(f"pred:{y_pred_real[i].item()}" + 50*" " +f"true:{y_list[i]}" )
+    Returns:
+        mse: mean squared error
+        preds: predicted values
+        trues: true values
+    """
+    model.eval()
+    y_pred_list = []
+    y_true_list = []
 
-    mse_real, preds, trues = evaluate_syn(y_pred_real,y_list, device= 'cpu')
+    with torch.no_grad():
+        for g in dataset.graph_list:
+            x = g.x.to(device)
+            edge_index = g.edge_index.to(device)
+            edge_weight = getattr(g, "edge_weight", None)
+            batch = torch.zeros(x.size(0), dtype=torch.long, device=device)
 
-    print(f"Evaluaion MSE is : {mse_real}")
+            # Forward pass
+            y_pred = model(x, edge_index, batch)
 
-    save_scatter(trues, preds,
-                'Train_Real_Graphs: True vs Predicted',
-                'true_vs_pred_scatter_real.png')
+            y_pred_list.append(y_pred.cpu())
+            y_true_list.append(float(g.y))
 
-    # List of saved files
-    files = [
-        'true_vs_pred_scatter_real.png'
-    ]
+    # Print predictions vs true values
+    print("\n=== Predictions vs Ground Truth ===")
+    for pred, true_val in zip(y_pred_list, y_true_list):
+        print(f"pred: {pred.item():.6f}" + 40*" " + f"true: {true_val:.6f}")
 
-    # Display each image
-    for f in files:
-        display(Image(filename=f))
+    # Compute evaluation metrics
+    mse, preds, trues = evaluate_syn(y_pred_list, y_true_list, device='cpu')
+    print(f"\nEvaluation MSE: {mse:.6f}")
 
-    y_pred_test_real = []
+    # Save scatter plot
+    save_scatter(trues, preds, scatter_title, scatter_filename)
 
-    for i in range(len(X_real_test_list)):
-        Xi = X_real_test_list[i]
-        edge_index = edge_index_test_list[i]
-        edge_weight = edge_weight_test_list[i]
-        edge_weight = edge_weight.to(torch.float)
-        batch = torch.zeros(Xi.size(0), dtype=torch.long, device=Xi.device)
+    # Display saved image
+    display(Image(filename=scatter_filename))
 
-        # y_pred_test_real.append(model_syn(Xi, edge_index, batch, edge_weight))
-        y_pred_test_real.append(model_syn(Xi, edge_index, batch))
+    return mse, preds, trues
 
-    for i in range(len(y_pred_test_real)):
-        print(f"pred:{y_pred_test_real[i].item()}" + 50*" " +f"true:{y_list[i]}" )
+if __name__ == "__main__":
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    mse_real, preds, trues = evaluate_syn(y_pred_test_real,y_test_list, device= 'cpu')
+    default_config = {
+        'hidden_dim': 128,
+        'dropout': 0.1,
+        'lr_gnn': 1e-3,
+        'threshold': 0.05,
+        'batch_size': 8,
+        'epochs': 200
+    }
 
-    print(f"Evaluaion MSE is : {mse_real}")
+    K1 = 10
+    K2 = 10
 
-    save_scatter(trues, preds,
-                'Test_Real_Graphs: True vs Predicted',
-                'true_vs_pred_test_scatter_real.png')
+    # === Prepare dataset and synthetic graphs ===
+    # synthetic_graph_list = [...]
+    # train_dataset = GraphEigenDataset(real_graph_list, K1, K2)
 
-    # List of saved files
-    files = [
-        'true_vs_pred_test_scatter_real.png'
-    ]
+    # === Initialize model and optimizer ===
+    model = GNN(hidden_dim=default_config['hidden_dim'], dropout=default_config['dropout']).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=default_config['lr_gnn'])
+    synthetic_graph_list = []  # Placeholder for synthetic graphs
+    train_dataset = None  # Placeholder for the real dataset
+    # === Train ===
+    trained_model, train_loader = train_synthetic_gnn(
+        model=model,
+        optimizer=optimizer,
+        synthetic_graph_list=synthetic_graph_list,
+        train_dataset=train_dataset,
+        default_config=default_config,
+        K1=K1,
+        K2=K2,
+        device=device,
+    )
 
-    # Display each image
-    for f in files:
-        display(Image(filename=f))
+    # === Evaluate ===
+    mse_real, preds, trues = evaluate_trained_model_on_dataset(
+        model=trained_model,
+        dataset=train_dataset,
+        device=device,
+        scatter_title='Train Real Graphs: True vs Predicted',
+        scatter_filename='true_vs_pred_scatter_real.png'
+    )
 
-        # 0.29064813256263733
+    print(f"\n✅ Final Evaluation Complete! MSE = {mse_real:.6f}")
+    display(Image(filename='true_vs_pred_scatter_real.png'))
